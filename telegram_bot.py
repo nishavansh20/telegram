@@ -28,9 +28,11 @@ class HealthCheckHandler(BaseHTTPRequestHandler):
 
         print(f"[CRON PING #{PING_COUNT}] Keepalive ping received at {now_str} | Uptime: {uptime_str} | Path: {self.path}")
 
+        has_token = bool(token)
         response_data = {
-            "status": "pong",
-            "message": "🏓 Peak Arena Reel Bot is awake and active!",
+            "status": "pong" if has_token else "waiting_for_token",
+            "message": "🏓 Peak Arena Reel Bot is awake and active!" if has_token else "⚠️ Server live, but TELEGRAM_BOT_TOKEN missing in Render environment variables!",
+            "bot_active": has_token,
             "ping_count": PING_COUNT,
             "uptime": uptime_str,
             "timestamp": now_str
@@ -45,40 +47,58 @@ class HealthCheckHandler(BaseHTTPRequestHandler):
         pass # Clean stdout handled by do_GET
 
 def start_health_server(port):
-    server = HTTPServer(("0.0.0.0", port), HealthCheckHandler)
-    print(f"[*] Render healthcheck server active on port {port}")
-    server.serve_forever()
+    try:
+        server = HTTPServer(("0.0.0.0", port), HealthCheckHandler)
+        print(f"[*] Render healthcheck server active on port {port}")
+        server.serve_forever()
+    except Exception as e:
+        print(f"[-] Healthcheck server error: {e}")
+
+# Start health check immediately so Render deploy never fails health check
+port_env = os.environ.get("PORT", "10000" if os.environ.get("RENDER") else None)
+if port_env:
+    threading.Thread(target=start_health_server, args=(int(port_env),), daemon=True).start()
 
 # Get token from environment or config file or prompt
 TOKEN_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "bot_token.txt")
 
-token = os.environ.get("TELEGRAM_BOT_TOKEN")
-if not token and os.path.exists(TOKEN_FILE):
-    with open(TOKEN_FILE, "r", encoding="utf-8") as f:
-        token = f.read().strip()
+def read_token():
+    t = os.environ.get("TELEGRAM_BOT_TOKEN")
+    if not t and os.path.exists(TOKEN_FILE):
+        try:
+            with open(TOKEN_FILE, "r", encoding="utf-8") as f:
+                t = f.read().strip()
+        except Exception:
+            pass
+    return t
+
+token = read_token()
 
 if not token:
     if not sys.stdin.isatty() or os.environ.get("RENDER"):
-        print("[-] Fatal: TELEGRAM_BOT_TOKEN environment variable is required on server.")
-        sys.exit(1)
-    print("=" * 60)
-    print("TELEGRAM BOT SETUP:")
-    print("1. Open Telegram and search @BotFather")
-    print("2. Send /newbot and get your API Token")
-    print("=" * 60)
-    token = input("Enter your Telegram Bot Token: ").strip()
-    if token:
-        with open(TOKEN_FILE, "w", encoding="utf-8") as f:
-            f.write(token)
+        print("=" * 60)
+        print("⚠️ NOTICE: TELEGRAM_BOT_TOKEN environment variable is not set!")
+        print("Add it in Render Dashboard -> Environment -> TELEGRAM_BOT_TOKEN")
+        print("Healthcheck server is still running on port so deployment succeeds.")
+        print("=" * 60)
+        while not token:
+            time.sleep(5)
+            token = read_token()
     else:
-        print("Error: No bot token provided. Exiting.")
-        sys.exit(1)
+        print("=" * 60)
+        print("TELEGRAM BOT SETUP:")
+        print("1. Open Telegram and search @BotFather")
+        print("2. Send /newbot and get your API Token")
+        print("=" * 60)
+        token = input("Enter your Telegram Bot Token: ").strip()
+        if token:
+            with open(TOKEN_FILE, "w", encoding="utf-8") as f:
+                f.write(token)
+        else:
+            print("Error: No bot token provided. Exiting.")
+            sys.exit(1)
 
 bot = telebot.TeleBot(token)
-
-port_env = os.environ.get("PORT")
-if port_env:
-    threading.Thread(target=start_health_server, args=(int(port_env),), daemon=True).start()
 
 print(f"[*] Peak Arena Telegram Bot is running! Listening for reels/shorts...")
 

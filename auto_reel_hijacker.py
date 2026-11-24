@@ -69,11 +69,11 @@ def hijack_video(video_path, output_name="PeakArena_Hijacked_Reel.mp4"):
     print(f"[*] Audio Inpainting Delay: {punch_delay_ms}ms")
 
     filter_complex = (
-        "[0:v]scale=720:1280:force_original_aspect_ratio=decrease,pad=720:1280:(ow-iw)/2:(oh-ih)/2:color=black,fps=30[vid_raw];"
+        "[0:v]scale=720:1280:force_original_aspect_ratio=increase,crop=720:1280,fps=30[vid_raw];"
         "[1:v]scale=720:1280:flags=lanczos,fps=30[app_screen];"
         f"[vid_raw][app_screen]overlay=0:0:enable='between(t,{app_start},{app_end})'[v];"
         "[0:a]volume=1.0[orig_a];"
-        f"[2:a]adelay={punch_delay_ms}|{punch_delay_ms},volume=1.3[punch_a];"
+        f"[2:a]adelay={punch_delay_ms}|{punch_delay_ms},volume=1.4[punch_a];"
         "[orig_a][punch_a]amix=inputs=2:duration=first:dropout_transition=1[a]"
     )
 

@@ -4,7 +4,12 @@ import time
 import threading
 from http.server import HTTPServer, BaseHTTPRequestHandler
 import telebot
+from telebot import apihelper
 from auto_reel_hijacker import download_video, hijack_video, OUTPUT_DIR, REF_DIR
+
+# Fix write/read socket timeouts for video uploads
+apihelper.READ_TIMEOUT = 300
+apihelper.CONNECT_TIMEOUT = 60
 
 import datetime
 import json
@@ -127,15 +132,40 @@ def handle_url(message):
             "🎁 *Promo Code:* `PEAK10` for free ₹10 bonus cash"
         )
 
-        with open(result_path, "rb") as video_file:
-            bot.send_video(message.chat.id, video_file, caption=caption, parse_mode="Markdown", supports_streaming=True)
+        sent = False
+        for attempt in range(3):
+            try:
+                with open(result_path, "rb") as video_file:
+                    bot.send_video(
+                        message.chat.id,
+                        video_file,
+                        caption=caption,
+                        parse_mode="Markdown",
+                        supports_streaming=True,
+                        timeout=300
+                    )
+                sent = True
+                break
+            except Exception as upload_err:
+                print(f"[*] Upload attempt {attempt + 1} error: {upload_err}")
+                if attempt < 2:
+                    time.sleep(2)
 
-        bot.delete_message(message.chat.id, status_msg.message_id)
-        print(f"[+] Successfully sent reel to chat {message.chat.id}")
+        if sent:
+            try:
+                bot.delete_message(message.chat.id, status_msg.message_id)
+            except Exception:
+                pass
+            print(f"[+] Successfully sent reel to chat {message.chat.id}")
+        else:
+            bot.edit_message_text("⚠️ Reel rendered, but Telegram upload timed out. Try again or check network.", message.chat.id, status_msg.message_id)
 
     except Exception as e:
         print(f"[-] Error: {e}")
-        bot.edit_message_text(f"❌ Error processing reel: {str(e)}", message.chat.id, status_msg.message_id)
+        try:
+            bot.edit_message_text(f"❌ Error processing reel: {str(e)}", message.chat.id, status_msg.message_id)
+        except Exception:
+            pass
 
 @bot.message_handler(content_types=['video'])
 def handle_video_file(message):
@@ -164,15 +194,40 @@ def handle_video_file(message):
             "🎁 *Promo Code:* `PEAK10` for free ₹10 bonus cash"
         )
 
-        with open(result_path, "rb") as video_file:
-            bot.send_video(message.chat.id, video_file, caption=caption, parse_mode="Markdown", supports_streaming=True)
+        sent = False
+        for attempt in range(3):
+            try:
+                with open(result_path, "rb") as video_file:
+                    bot.send_video(
+                        message.chat.id,
+                        video_file,
+                        caption=caption,
+                        parse_mode="Markdown",
+                        supports_streaming=True,
+                        timeout=300
+                    )
+                sent = True
+                break
+            except Exception as upload_err:
+                print(f"[*] Upload attempt {attempt + 1} error: {upload_err}")
+                if attempt < 2:
+                    time.sleep(2)
 
-        bot.delete_message(message.chat.id, status_msg.message_id)
-        print(f"[+] Successfully sent reel to chat {message.chat.id}")
+        if sent:
+            try:
+                bot.delete_message(message.chat.id, status_msg.message_id)
+            except Exception:
+                pass
+            print(f"[+] Successfully sent reel to chat {message.chat.id}")
+        else:
+            bot.edit_message_text("⚠️ Reel rendered, but Telegram upload timed out. Try again or check network.", message.chat.id, status_msg.message_id)
 
     except Exception as e:
         print(f"[-] Error: {e}")
-        bot.edit_message_text(f"❌ Error processing reel: {str(e)}", message.chat.id, status_msg.message_id)
+        try:
+            bot.edit_message_text(f"❌ Error processing reel: {str(e)}", message.chat.id, status_msg.message_id)
+        except Exception:
+            pass
 
 if __name__ == "__main__":
-    bot.infinity_polling(timeout=20, long_polling_timeout=10)
+    bot.infinity_polling(timeout=60, long_polling_timeout=30, skip_pending=True)

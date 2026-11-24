@@ -88,10 +88,11 @@ def hijack_video(video_path, output_name="PeakArena_Hijacked_Reel.mp4"):
         "-map", "[v]",
         "-map", "[a]",
         "-c:v", "libx264",
-        "-preset", "medium",
-        "-crf", "19",
+        "-preset", "veryfast",
+        "-crf", "23",
+        "-movflags", "+faststart",
         "-c:a", "aac",
-        "-b:a", "192k",
+        "-b:a", "128k",
         output_path
     ]
 

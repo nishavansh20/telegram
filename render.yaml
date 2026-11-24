@@ -1,0 +1,9 @@
+services:
+  - type: web
+    name: peak-arena-reel-bot
+    runtime: docker
+    plan: free
+    healthCheckPath: /
+    envVars:
+      - key: TELEGRAM_BOT_TOKEN
+        sync: false

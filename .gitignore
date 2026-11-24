@@ -1,0 +1,11 @@
+venv/
+__pycache__/
+*.pyc
+output/*.mp4
+output/*.mp3
+output/*.png
+output/*.jpg
+assets/references/*.mp4
+assets/references/*.webm
+bot_token.txt
+.env

@@ -1,0 +1,7 @@
+yt-dlp>=2026.11.23
+imageio-ffmpeg>=0.8.1
+edge-tts>=7.3.1
+pillow>=10.0.0
+requests>=2.30.0
+SpeechRecognition>=3.10.0
+pyTelegramBotAPI>=4.20.0

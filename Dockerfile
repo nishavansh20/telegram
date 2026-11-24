@@ -1,25 +1,23 @@
 FROM python:3.11-slim
 
-# Install system dependencies: ffmpeg, git, fonts
+# Install system ffmpeg and git
 RUN apt-get update && apt-get install -y --no-install-recommends \
     ffmpeg \
-    fonts-dejavu-core \
-    ca-certificates \
-    curl \
+    git \
     && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /app
 
-# Install python dependencies
+# Install dependencies
 COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 
-# Copy source code and assets
+# Copy application files
 COPY . .
 
-# Ensure output and references directory exist
-RUN mkdir -p output assets/references
+# Ensure directories exist
+RUN mkdir -p temp output assets
 
-ENV PYTHONUNBUFFERED=1
+EXPOSE 8080
 
-CMD ["python", "telegram_bot.py"]
+CMD ["python", "bot.py"]

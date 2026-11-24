@@ -1,9 +1,22 @@
 services:
   - type: web
     name: peak-arena-reel-bot
-    runtime: docker
+    env: docker
+    dockerfilePath: Dockerfile
     plan: free
-    healthCheckPath: /
+    healthCheckPath: /health
     envVars:
       - key: TELEGRAM_BOT_TOKEN
         sync: false
+      - key: GEMINI_API_KEY
+        sync: false
+      - key: PORT
+        value: 8080
+      - key: DEFAULT_INSTA_HANDLE
+        value: "@_maxeddd"
+      - key: DEFAULT_OUTRO_TITLE
+        value: "PEAK ARENA"
+      - key: DEFAULT_OUTRO_SUBTITLE
+        value: "Daily Free Fire & BGMI Tournaments • Instant UPI Payouts"
+      - key: DEFAULT_OUTRO_LINK
+        value: "Download Link in Bio / Channel"

@@ -1,11 +1,26 @@
+# Virtual Environment
 venv/
+.venv/
+env/
+
+# Temporary and Rendered Files
+temp/
+output/
+*.mp4
+*.wav
+*.ogg
+*.avi
+*.mov
+
+# Python
 __pycache__/
-*.pyc
-output/*.mp4
-output/*.mp3
-output/*.png
-output/*.jpg
-assets/references/*.mp4
-assets/references/*.webm
-bot_token.txt
+*.py[cod]
+*$py.class
+*.log
+
+# Environment variables
 .env
+
+# OS
+.DS_Store
+Thumbs.db

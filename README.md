@@ -1,32 +1,75 @@
-# Peak Arena Viral Reel Automation & Hijacker Engine
+# Peak Arena Reel Automation Telegram Bot 🎬
 
-Automated reel pipeline that takes any gaming video URL or clip, preserves the original creator's real voice and gameplay flow (no arbitrary top/bottom/middle borders), in-paints "Peak Arena" into the audio track, and seamlessly swaps competitor app screens for full-screen Peak Arena tournament app UI.
+Automated video branding bot for **Peak Arena**. 
+Send the Telegram bot any **Instagram Reel** or **YouTube Shorts** link (or upload any raw gaming video directly). The bot auto-downloads, resizes to vertical 9:16 (1080×1920), overlays branded top and bottom cards, replaces competitor app screenshots with the Peak Arena app screen, replaces spoken voice audio with "Peak Arena", and appends an Instagram Bio download outro screen!
 
-## Features
-1. **100% Natural Flow**:
-   - Zero added headers, footers, or cards over gameplay.
-   - Gameplay plays completely unaltered, just like the original video.
-2. **App Screen Swap**:
-   - When the creator introduces the app, video smoothly cuts to Peak Arena's full-screen vertical mobile dashboard:
-     - Free Fire Bermuda Solo (Entry ₹15, Per Kill ₹12, Prize Pool ₹700)
-     - Clash Squad 4v4 Ranked (Entry ₹20, Win ₹35)
-     - Wallet Balance: ₹750
-     - Instant 5-Min UPI Withdrawal Proof
-     - Promo Code: `PEAK10`
-3. **Voice In-Painting**:
-   - Retains 100% of the original speaker's real human voice and game sounds.
-   - Slices in a matched vocal punch for "Peak Arena app mein" right as the app is shown.
-4. **URL Downloader & Processor**:
-   - Pass any Instagram reel URL or YouTube Shorts URL directly.
+---
 
-## Usage
-Double-click `run_generator.bat`:
-- **Option 1**: Paste any reel URL (`https://www.instagram.com/reel/...`) to download and hijack it.
-- **Option 2**: Run on bundled reference reel.
-- **Option 3**: Generate studio-style tournament promo reel with full custom match cards.
+## ⚡ What The Bot Automates
 
-Or via command line:
-```powershell
-.\venv\Scripts\python.exe auto_reel_hijacker.py --url "https://www.instagram.com/reel/DfthLTIt6-p/"
+1. **Top Header Card (Cyan `#00e5ff` Outline)**:
+   - Official Peak Arena shield logo on the left.
+   - White bold title: `PEAK ARENA`
+   - Cyan subtitle: `BATTLEGROUND TOURNAMENTS`
+2. **Bottom Cards (Gold `#e5a93c` Outline)**:
+   - Dynamic 3-Phase Match Info:
+     - Phase 1: `JOIN THE BATTLE / ENTRY 15 INR | 14 INR PER KILL / 4-5 MATCHES`
+     - Phase 2: `LEVEL UP YOUR GAME / SHOW YOUR SKILLS IN THE ARENA`
+     - Phase 3: `READY TO ENTER? / PEAK ARENA IS CALLING`
+   - Or customizable via user prompt!
+3. **Competitor App Replacement**:
+   - Replaces competitor app screenshots shown during the reel (e.g. 12s–16s) with the real Peak Arena tournament & wallet UI framed in rounded cyan.
+4. **Voice Audio Replacement ("Peak Arena")**:
+   - Ducks competitor name in audio track and punches in clean Hindi voice saying "Peak Arena" without altering background game sounds.
+5. **Instagram Bio Outro**:
+   - 3.2-second outro card displaying your Instagram Profile (`@_maxeddd`) with followers, bio bullets, and "DOWNLOAD APP FROM BIO LINK".
+
+---
+
+## 🚀 Running Locally (Windows)
+
+1. Ensure `.env` contains:
+   ```env
+   TELEGRAM_BOT_TOKEN=9030505295:AAEm8aOHzGTiYlARK7ykfj2n8WUqJpvNwJE
+   ```
+2. Double-click **`run_bot.bat`**.
+3. The bot connects and listens on Telegram!
+
+---
+
+## ☁️ Running on Cloud / Render.com
+
+If deploying to Render or Docker, make sure to add:
+- **Environment Variable**:
+  - Key: `TELEGRAM_BOT_TOKEN`
+  - Value: `9030505295:AAEm8aOHzGTiYlARK7ykfj2n8WUqJpvNwJE`
+
+---
+
+## 📲 How to Use in Telegram
+
+### 1. Default Mode (Fully Automated)
+Send the reel link:
+```text
+https://www.instagram.com/reel/C7.../
 ```
-Rendered output is saved in `output/PeakArena_Hijacked_Reel.mp4`.
+The bot automatically downloads, cuts, brands, swaps app screen, ducks voice, and adds the Instagram bio outro.
+
+### 2. Custom Promotional Prompt
+```text
+https://www.instagram.com/reel/... | WIN ₹1000 TONIGHT | ENTRY 15 INR | 14 PER KILL
+```
+
+### 3. Custom Time Controls (Optional)
+```text
+https://www.instagram.com/reel/... | app: 11-15 | voice: 12-13.5 | insta: @_maxeddd
+```
+
+### 4. Send or Forward Video Directly
+Attach any video file and put your prompt in the caption!
+
+### 5. Bot Commands
+- `/start` - Welcome message and quick start instructions.
+- `/demo` - Render and send a sample reel.
+- `/set_insta <handle>` - Change default Instagram handle on outro cards.
+- `/help` - Command reference.

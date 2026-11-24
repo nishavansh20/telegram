@@ -1,7 +1,8 @@
 venv/
+temp/
+output/
 __pycache__/
 *.pyc
-output/
-bot_token.txt
-.git/
-.vscode/
+.env
+.git
+.gitignore

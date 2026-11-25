@@ -393,10 +393,11 @@ async def receive_video(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     except Exception as e:
         logger.error(f"receive_video error: {e}", exc_info=True)
+        err_msg = f"&#10060; Error: <code>{html.escape(str(e)[:1500])}</code>"
         try:
-            await status.edit_text(f"&#10060; Error: <code>{html.escape(str(e))}</code>", parse_mode="HTML")
+            await status.edit_text(err_msg, parse_mode="HTML")
         except Exception:
-            pass
+            await update.message.reply_text(f"Error: {str(e)[:1500]}")
         return ConversationHandler.END
 
 

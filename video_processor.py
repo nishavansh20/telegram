@@ -99,7 +99,7 @@ def download_media(url: str, progress_callback: Optional[Callable[[str], None]] 
         "format": "bestvideo[ext=mp4]+bestaudio[ext=m4a]/best[ext=mp4]/best",
         "outtmpl": out_template,
         "merge_output_format": "mp4",
-        "ffmpeg_location": str(Path(__file__).parent / "venv" / "Scripts"),
+        "ffmpeg_location": FFMPEG_EXE,
         "quiet": True,
         "no_warnings": True,
         "noplaylist": True,

@@ -17,16 +17,20 @@ import logging
 import subprocess
 import re
 from pathlib import Path
-from typing import Optional, List, Dict, Tuple, Callable
+from typing import Optional, List, Dict, Tuple, Callable, Any
 
 from config import (
     AGY_LS_EXE, AGY_CLI_PATH, AGY_BRAIN_DIR, AGY_DEFAULT_MODEL,
-    OUTPUT_DIR, TEMP_DIR, GEMINI_API_KEY
+    GEMINI_CLOUD_MODEL, GEMINI_FALLBACK_MODELS, ASSETS_DIR, OUTPUT_DIR,
+    TEMP_DIR, GEMINI_API_KEY, ELEVENLABS_API_KEY
 )
 
 logger = logging.getLogger("AGYBridge")
 
-MP4_REGEX = re.compile(r"([A-Za-z]:\\[^ \r\n\t\"'<>:]+\.mp4|output[\\/][^ \r\n\t\"'<>:]+\.mp4)", re.IGNORECASE)
+MP4_REGEX = re.compile(
+    r"([A-Za-z]:\\[^ \r\n\t\"'<>:]+\.mp4|/[^ \r\n\t\"'<>:]+\.mp4|output[\\/][^ \r\n\t\"'<>:]+\.mp4)",
+    re.IGNORECASE,
+)
 
 
 class AGYBridge:
@@ -110,6 +114,21 @@ class AGYBridge:
         parts.append(f"User Request: {current_prompt}")
         return "\n".join(parts)
 
+    def _collect_new_videos(self, before_videos: set, final_answer: str) -> List[Path]:
+        after_videos = {p.resolve() for p in OUTPUT_DIR.glob("*.mp4")}
+        new_videos = list(after_videos - before_videos)
+        for match in MP4_REGEX.findall(final_answer):
+            cand = Path(match).resolve()
+            if cand.exists() and cand not in new_videos:
+                new_videos.append(cand)
+        return new_videos
+
+    def _record_history(self, user_id: int, prompt: str, answer: str):
+        self.user_histories.setdefault(user_id, []).append({
+            "user": prompt,
+            "agent": answer,
+        })
+
     async def ask_agent(
         self,
         user_id: int,
@@ -119,16 +138,40 @@ class AGYBridge:
         timeout: float = 180.0
     ) -> Tuple[str, List[Path]]:
         """
-        Send prompt to AGY Agent, track execution in real time, and return response + output videos.
+        Route prompt to local Antigravity Agent if available, else Gemini Cloud (Hydrogen).
         """
-        if not self.is_available():
-            raise RuntimeError(f"Neither AGY executable ({self.ls_exe}) nor CLI ({self.cli_path}) found.")
-
-        full_prompt = self._build_contextual_prompt(user_id, prompt, attached_files)
-
-        # Snapshot output directory before running
         OUTPUT_DIR.mkdir(exist_ok=True)
         before_videos = {p.resolve() for p in OUTPUT_DIR.glob("*.mp4")}
+
+        if self.is_available():
+            try:
+                return await self._ask_local_agy(
+                    user_id, prompt, attached_files, status_callback, timeout, before_videos
+                )
+            except Exception as e:
+                if not GEMINI_API_KEY:
+                    raise
+                logger.warning(f"Local AGY failed ({e}), falling back to Gemini Cloud ({GEMINI_CLOUD_MODEL})")
+
+        if GEMINI_API_KEY:
+            return await self._ask_gemini_cloud(
+                user_id, prompt, attached_files, status_callback, before_videos
+            )
+
+        raise RuntimeError(
+            f"Neither local AGY runtime ({self.ls_exe}) nor GEMINI_API_KEY is available."
+        )
+
+    async def _ask_local_agy(
+        self,
+        user_id: int,
+        prompt: str,
+        attached_files: Optional[List[Path]],
+        status_callback: Optional[Callable[[str], None]],
+        timeout: float,
+        before_videos: set,
+    ) -> Tuple[str, List[Path]]:
+        full_prompt = self._build_contextual_prompt(user_id, prompt, attached_files)
 
         if status_callback:
             status_callback("⚡ <b>Antigravity Agent initializing...</b>")
@@ -229,24 +272,130 @@ class AGYBridge:
         if not final_answer:
             final_answer = "⚠️ Antigravity agent completed execution without text response."
 
-        # Detect generated videos in output folder
-        after_videos = {p.resolve() for p in OUTPUT_DIR.glob("*.mp4")}
-        new_videos = list(after_videos - before_videos)
+        new_videos = self._collect_new_videos(before_videos, final_answer)
+        self._record_history(user_id, prompt, final_answer)
+        return final_answer, new_videos
 
-        # Also search final text for video paths
-        for match in MP4_REGEX.findall(final_answer):
-            cand = Path(match).resolve()
-            if cand.exists() and cand not in new_videos:
-                new_videos.append(cand)
+    async def _ask_gemini_cloud(
+        self,
+        user_id: int,
+        prompt: str,
+        attached_files: Optional[List[Path]],
+        status_callback: Optional[Callable[[str], None]],
+        before_videos: set,
+    ) -> Tuple[str, List[Path]]:
+        """Cloud agent fallback powered by Gemini 4 Hydrogen via google-genai."""
+        from google import genai
+        from google.genai import types
+        from video_processor import download_media, apply_edit_instructions, process_reel
+        from prompt_parser import parse_edit_prompt
 
-        # Store turn in user history
-        if user_id not in self.user_histories:
-            self.user_histories[user_id] = []
-        self.user_histories[user_id].append({
-            "user": prompt,
-            "agent": final_answer
-        })
+        if status_callback:
+            status_callback(f"☁️ <b>Gemini Cloud ({GEMINI_CLOUD_MODEL}) thinking...</b>")
 
+        def notify(msg: str):
+            if status_callback:
+                status_callback(msg)
+
+        def download_reel(url: str) -> str:
+            """Download an Instagram Reel or YouTube Short from a URL and return the local video path."""
+            notify("⚙️ <b>Action:</b> <code>download_reel</code>")
+            TEMP_DIR.mkdir(exist_ok=True)
+            path = download_media(url)
+            return json.dumps({"video_path": str(path), "status": "downloaded"})
+
+        def edit_reel(video_path: str, edit_prompt: str, images: Optional[List[str]] = None) -> str:
+            """Edit a local video using natural-language edit instructions (replace app screen, logo, bio, voiceover, text overlay, mute, extend)."""
+            notify("⚙️ <b>Action:</b> <code>edit_reel</code>")
+            video = Path(video_path)
+            if not video.exists():
+                return json.dumps({"error": f"video_path not found: {video_path}"})
+            img_list = images or []
+            instructions = parse_edit_prompt(edit_prompt, img_list, GEMINI_API_KEY)
+            if not instructions:
+                return json.dumps({"error": "Could not parse any edit instructions from prompt."})
+            img_queue = [Path(p) for p in img_list if Path(p).exists()]
+            for instr in instructions:
+                if instr.image_path is not None and not instr.image_path.exists() and img_queue:
+                    instr.image_path = img_queue.pop(0)
+            output = apply_edit_instructions(video, instructions)
+            return json.dumps({"output_path": str(output), "ops_applied": len(instructions), "status": "done"})
+
+        def peak_arena_rebrand(video_path: str, insta_handle: str = "@_maxeddd") -> str:
+            """Apply the full automated Peak Arena rebrand (app overlay, shield logo, bio outro) to a video."""
+            notify("⚙️ <b>Action:</b> <code>peak_arena_rebrand</code>")
+            video = Path(video_path)
+            if not video.exists():
+                return json.dumps({"error": f"video_path not found: {video_path}"})
+            output = process_reel(
+                video_path=video,
+                replace_bio=True,
+                insta_handle=insta_handle,
+                elevenlabs_api_key=ELEVENLABS_API_KEY,
+            )
+            return json.dumps({"output_path": str(output), "status": "done"})
+
+        def list_workspace_files() -> str:
+            """List files currently in output/, assets/, and temp/ directories."""
+            notify("⚙️ <b>Action:</b> <code>list_workspace_files</code>")
+            data = {}
+            for name, folder in [("output", OUTPUT_DIR), ("assets", ASSETS_DIR), ("temp", TEMP_DIR)]:
+                data[name] = [str(p.name) for p in sorted(folder.glob("*"))[:30]] if folder.exists() else []
+            return json.dumps(data)
+
+        system_inst = (
+            "You are the Peak Arena Cloud Agent running over Telegram.\n"
+            "Tools available: download_reel, edit_reel, peak_arena_rebrand, list_workspace_files.\n"
+            "When asked to download, rebrand, or edit videos, invoke the tools directly and report the exact output path.\n"
+            "Keep replies concise and readable on mobile Telegram."
+        )
+
+        # Build contents list (recent history text + current request + attached image bytes)
+        history_lines = []
+        for turn in self.user_histories.get(user_id, [])[-4:]:
+            history_lines.append(f"User: {turn['user']}\nAgent: {turn['agent']}")
+        ctx_text = ""
+        if history_lines:
+            ctx_text += "Recent conversation:\n" + "\n".join(history_lines) + "\n\n"
+        if attached_files:
+            ctx_text += "Attached local files:\n" + "\n".join(f"- {f.resolve()}" for f in attached_files) + "\n\n"
+        ctx_text += f"User Request: {prompt}"
+
+        contents: List[Any] = [ctx_text]
+        for f in (attached_files or []):
+            if f.exists() and f.suffix.lower() in (".png", ".jpg", ".jpeg", ".webp"):
+                mime = "image/png" if f.suffix.lower() == ".png" else "image/jpeg"
+                contents.append(types.Part.from_bytes(data=f.read_bytes(), mime_type=mime))
+
+        def _invoke_cloud() -> str:
+            client = genai.Client(
+                api_key=GEMINI_API_KEY,
+                http_options=types.HttpOptions(
+                    timeout=25000,
+                    retry_options=types.HttpRetryOptions(attempts=2),
+                ),
+            )
+            cfg = types.GenerateContentConfig(
+                system_instruction=system_inst,
+                tools=[download_reel, edit_reel, peak_arena_rebrand, list_workspace_files],
+            )
+            candidates = list(dict.fromkeys(m for m in (GEMINI_CLOUD_MODEL, *GEMINI_FALLBACK_MODELS) if m))
+
+            last_err = None
+            for model_name in candidates:
+                try:
+                    chat = client.chats.create(model=model_name, config=cfg)
+                    resp = chat.send_message(contents)
+                    if resp.text:
+                        return resp.text.strip()
+                except Exception as err:
+                    last_err = err
+                    logger.warning(f"Cloud model {model_name} failed ({err}), trying next...")
+            raise RuntimeError(f"All cloud Gemini models failed: {last_err}")
+
+        final_answer = await asyncio.to_thread(_invoke_cloud)
+        new_videos = self._collect_new_videos(before_videos, final_answer)
+        self._record_history(user_id, prompt, final_answer)
         return final_answer, new_videos
 
     def get_status(self) -> Dict[str, any]:
@@ -262,6 +411,9 @@ class AGYBridge:
 
         return {
             "cli_available": self.is_available(),
+            "cloud_available": bool(GEMINI_API_KEY),
+            "model": AGY_DEFAULT_MODEL if self.is_available() else GEMINI_CLOUD_MODEL,
+            "cloud_model": GEMINI_CLOUD_MODEL,
             "ls_exe": self.ls_exe,
             "cli_path": self.cli_path,
             "active_daemons": len(active_daemons),

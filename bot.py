@@ -190,17 +190,24 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 async def status_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     st = agy_bridge.get_status()
-    daemon_txt = f"PID {st['daemon_info']['pid']} (port {st['daemon_info']['httpPort']})" if st.get("daemon_info") else "Offline"
-    cli_txt = "Available ✅" if st["cli_available"] else "Missing ❌"
+    daemon_info = st.get("daemon_info") or {}
+    daemon_txt = f"PID {daemon_info['pid']} (port {daemon_info['httpPort']})" if daemon_info else "N/A (Cloud Mode)"
+    if st["cli_available"]:
+        runtime_txt = "Local AGY ✅"
+    elif st.get("cloud_available"):
+        runtime_txt = "Gemini Cloud ✅"
+    else:
+        runtime_txt = "Offline ❌"
 
     msg = (
-        "🌐 <b>Antigravity (AGY) Bridge Status</b>\n\n"
-        f"• <b>AGY Runtime:</b> {cli_txt}\n"
+        "🌐 <b>Antigravity / Cloud Bridge Status</b>\n\n"
+        f"• <b>Runtime:</b> {runtime_txt}\n"
+        f"• <b>Model:</b> <code>{st.get('model', 'default')}</code>\n"
         f"• <b>Daemon:</b> {daemon_txt}\n"
         f"• <b>Active Sessions:</b> {st['active_sessions']}\n"
         f"• <b>Output Videos:</b> {st['output_videos_count']}\n"
         f"• <b>Workspace:</b> <code>Peak-Arena-Reel-Automation</code>\n\n"
-        "<i>Send any message to chat with AGY or trigger automations!</i>"
+        "<i>Send any message to chat with Hydrogen or trigger automations!</i>"
     )
     await update.message.reply_text(msg, parse_mode="HTML")
 
@@ -222,13 +229,18 @@ async def ping_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     hours, rem = divmod(uptime_sec, 3600)
     mins, secs = divmod(rem, 60)
     agy_st = agy_bridge.get_status()
-    daemon_txt = "Online ✅" if agy_st["cli_available"] and agy_st.get("daemon_info") else "Offline ⚠️"
+    daemon_info = agy_st.get("daemon_info") or {}
+    if agy_st["cli_available"] and daemon_info:
+        runtime_txt = f"Local AGY Online ✅ (PID {daemon_info.get('pid', 'N/A')})"
+    elif agy_st.get("cloud_available"):
+        runtime_txt = f"Cloud Hydrogen Online ✅ ({agy_st.get('cloud_model', 'gemini-4-hydrogen')})"
+    else:
+        runtime_txt = "Offline ⚠️"
 
     reply = (
         "🏓 <b>Pong!</b>\n\n"
         f"• <b>Uptime:</b> {hours}h {mins}m {secs}s\n"
-        f"• <b>AGY Runtime:</b> {daemon_txt}\n"
-        f"• <b>Active Daemon:</b> PID {agy_st.get('daemon_info', {}).get('pid', 'N/A')}\n"
+        f"• <b>Agent Runtime:</b> {runtime_txt}\n"
         f"• <b>Health Endpoint:</b> <code>http://0.0.0.0:{HEALTH_PORT}/health</code>\n"
         "• <b>Status:</b> 24/7 Active &amp; Ready"
     )
@@ -875,6 +887,7 @@ def main():
     print("Peak Arena Reel Automation + Antigravity (AGY) Telegram Bridge")
     print(f"Token: {TELEGRAM_BOT_TOKEN[:10]}...{TELEGRAM_BOT_TOKEN[-6:]}")
     print(f"AGY Runtime: {'ONLINE' if agy_status['cli_available'] else 'OFFLINE'}")
+    print(f"AGY Model: {agy_status.get('model', 'default')}")
     print(f"Gemini API: {'YES' if GEMINI_API_KEY else 'NO (regex fallback)'}")
     print(f"24/7 Health Endpoint: http://0.0.0.0:{HEALTH_PORT}/health")
     print("=" * 60)

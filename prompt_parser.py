@@ -108,20 +108,48 @@ Example output:
 
 
 def parse_with_gemini(prompt: str, attached_images: List[str], api_key: str) -> List[EditInstruction]:
-    """Call Gemini Flash to parse the prompt → list of EditInstruction."""
+    """Call Gemini (Hydrogen primary, Flash fallback) via google-genai to parse prompt -> EditInstruction list."""
     try:
-        import google.generativeai as genai
-        genai.configure(api_key=api_key)
-        model = genai.GenerativeModel("gemini-1.5-flash")
+        from google import genai
+        from google.genai import types
+        from config import GEMINI_CLOUD_MODEL, GEMINI_FALLBACK_MODELS
 
-        image_note = ""
-        if attached_images:
-            image_note = f"\n\nAttached images: {', '.join(attached_images)}"
-
-        response = model.generate_content(
-            [_SYSTEM_PROMPT, f"User prompt:\n{prompt}{image_note}"]
+        client = genai.Client(
+            api_key=api_key,
+            http_options=types.HttpOptions(
+                timeout=25000,
+                retry_options=types.HttpRetryOptions(attempts=2),
+            ),
         )
-        raw = response.text.strip()
+        image_note = f"\n\nAttached images: {', '.join(attached_images)}" if attached_images else ""
+        user_content = f"User prompt:\n{prompt}{image_note}"
+
+        cfg = types.GenerateContentConfig(
+            system_instruction=_SYSTEM_PROMPT,
+            response_mime_type="application/json",
+        )
+
+        # Prefer Hydrogen; fall back rapidly to Flash variants if temporary 503 high demand hits
+        candidates = list(dict.fromkeys(m for m in (GEMINI_CLOUD_MODEL, *GEMINI_FALLBACK_MODELS) if m))
+
+        last_err = None
+        raw = None
+        for model_name in candidates:
+            try:
+                response = client.models.generate_content(
+                    model=model_name,
+                    contents=user_content,
+                    config=cfg,
+                )
+                if response.text:
+                    raw = response.text.strip()
+                    break
+            except Exception as err:
+                last_err = err
+                logger.warning(f"Gemini model {model_name} failed ({err}), trying next...")
+
+        if not raw:
+            raise RuntimeError(f"All Gemini models failed: {last_err}")
 
         # Strip markdown code fences if model wrapped it
         raw = re.sub(r"^```[a-z]*\n?", "", raw, flags=re.MULTILINE)

@@ -20,8 +20,8 @@ def _get_processor():
     return download_media, apply_edit_instructions, process_reel
 
 def _get_parser():
-    from prompt_parser import parse_edit_prompt
-    return parse_edit_prompt
+    from prompt_parser import parse_edit_prompt, assign_images_to_instructions
+    return parse_edit_prompt, assign_images_to_instructions
 
 def _get_config():
     from config import TEMP_DIR, OUTPUT_DIR, GEMINI_API_KEY, ELEVENLABS_API_KEY
@@ -47,7 +47,7 @@ def edit_reel(video_path: str, prompt: str, images: Optional[List[str]] = None) 
     Provide image paths for visual replacements.
     """
     _, apply_edit_instructions, _ = _get_processor()
-    parse_edit_prompt = _get_parser()
+    parse_edit_prompt, assign_images_to_instructions = _get_parser()
     TEMP_DIR, OUTPUT_DIR, GEMINI_API_KEY, _ = _get_config()
 
     video = Path(video_path)
@@ -60,12 +60,7 @@ def edit_reel(video_path: str, prompt: str, images: Optional[List[str]] = None) 
     if not instructions:
         return json.dumps({"error": "Could not parse any edit instructions from prompt."})
 
-    # Resolve image paths
-    img_queue = [Path(p) for p in img_list if Path(p).exists()]
-    for instr in instructions:
-        if instr.image_path is not None and not instr.image_path.exists():
-            if img_queue:
-                instr.image_path = img_queue.pop(0)
+    assign_images_to_instructions(instructions, [Path(p) for p in img_list])
 
     output = apply_edit_instructions(video, instructions)
     return json.dumps({"output_path": str(output), "ops_applied": len(instructions), "status": "done"})

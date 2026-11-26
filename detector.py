@@ -87,7 +87,7 @@ def _is_app_frame(frame: np.ndarray) -> bool:
 def detect_app_screen_ranges(
     source,
     sample_interval: float = 0.5,
-    min_duration: float = 1.0,
+    min_duration: float = 1.8,
     max_duration: Optional[float] = None,
 ) -> List[Tuple[float, float]]:
     """
@@ -126,7 +126,15 @@ def detect_app_screen_ranges(
     if in_range and (dur - start_t) >= min_duration:
         ranges.append((round(start_t, 1), round(dur, 1)))
 
-    return ranges
+    # Merge nearby popup detections (<= 1.0s gap) to prevent flickering
+    merged: List[Tuple[float, float]] = []
+    for s, e in ranges:
+        if merged and (s - merged[-1][1]) <= 1.0:
+            merged[-1] = (merged[-1][0], e)
+        else:
+            merged.append((s, e))
+
+    return merged
 
 
 def detect_bio_screen(

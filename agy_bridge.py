@@ -284,11 +284,11 @@ class AGYBridge:
         status_callback: Optional[Callable[[str], None]],
         before_videos: set,
     ) -> Tuple[str, List[Path]]:
-        """Cloud agent fallback powered by Gemini 4 Hydrogen via google-genai."""
+        """Cloud agent fallback via google-genai with manual single-run tool dispatch."""
         from google import genai
         from google.genai import types
         from video_processor import download_media, apply_edit_instructions, process_reel, update_default_asset
-        from prompt_parser import parse_edit_prompt
+        from prompt_parser import parse_edit_prompt, assign_images_to_instructions
 
         if status_callback:
             status_callback(f"☁️ <b>Gemini Cloud ({GEMINI_CLOUD_MODEL}) thinking...</b>")
@@ -319,10 +319,7 @@ class AGYBridge:
             instructions = parse_edit_prompt(edit_prompt, img_list, GEMINI_API_KEY)
             if not instructions:
                 return json.dumps({"error": "Could not parse any edit instructions from prompt."})
-            img_queue = [Path(p) for p in img_list if Path(p).exists()]
-            for instr in instructions:
-                if instr.image_path is not None and not instr.image_path.exists() and img_queue:
-                    instr.image_path = img_queue.pop(0)
+            assign_images_to_instructions(instructions, [Path(p) for p in img_list])
             output = apply_edit_instructions(video, instructions)
             return json.dumps({"output_path": str(output), "ops_applied": len(instructions), "status": "done"})
 
@@ -367,37 +364,93 @@ class AGYBridge:
             ctx_text += "Attached local files:\n" + "\n".join(f"- {f.resolve()}" for f in attached_files) + "\n\n"
         ctx_text += f"User Request: {prompt}"
 
-        contents: List[Any] = [ctx_text]
+        user_parts: List[Any] = [types.Part.from_text(text=ctx_text)]
         for f in (attached_files or []):
             if f.exists() and f.suffix.lower() in (".png", ".jpg", ".jpeg", ".webp"):
                 mime = "image/png" if f.suffix.lower() == ".png" else "image/jpeg"
-                contents.append(types.Part.from_bytes(data=f.read_bytes(), mime_type=mime))
+                user_parts.append(types.Part.from_bytes(data=f.read_bytes(), mime_type=mime))
+
+        tool_map = {
+            "download_reel": download_reel,
+            "edit_reel": edit_reel,
+            "peak_arena_rebrand": peak_arena_rebrand,
+            "replace_default_asset": replace_default_asset,
+            "list_workspace_files": list_workspace_files,
+        }
 
         def _invoke_cloud() -> str:
             client = genai.Client(
                 api_key=GEMINI_API_KEY,
                 http_options=types.HttpOptions(
-                    timeout=25000,
-                    retry_options=types.HttpRetryOptions(attempts=2),
+                    timeout=18000,
+                    retry_options=types.HttpRetryOptions(attempts=1),
                 ),
             )
             cfg = types.GenerateContentConfig(
                 system_instruction=system_inst,
-                tools=[download_reel, edit_reel, peak_arena_rebrand, replace_default_asset, list_workspace_files],
+                tools=list(tool_map.values()),
+                automatic_function_calling=types.AutomaticFunctionCallingConfig(disable=True),
             )
-            candidates = list(dict.fromkeys(m for m in (GEMINI_CLOUD_MODEL, *GEMINI_FALLBACK_MODELS) if m))
+            active_candidates = list(dict.fromkeys(m for m in (GEMINI_CLOUD_MODEL, *GEMINI_FALLBACK_MODELS) if m))
+            history: List[Any] = [types.Content(role="user", parts=user_parts)]
+            completed_tools: List[str] = []
+            last_err: Optional[Exception] = None
 
-            last_err = None
-            for model_name in candidates:
-                try:
-                    chat = client.chats.create(model=model_name, config=cfg)
-                    resp = chat.send_message(contents)
-                    if resp.text:
-                        return resp.text.strip()
-                except Exception as err:
-                    last_err = err
-                    logger.warning(f"Cloud model {model_name} failed ({err}), trying next...")
-            raise RuntimeError(f"All cloud Gemini models failed: {last_err}")
+            for _step in range(6):
+                resp = None
+                for model_name in list(active_candidates):
+                    try:
+                        resp = client.models.generate_content(
+                            model=model_name,
+                            contents=history,
+                            config=cfg,
+                        )
+                        if resp and (resp.function_calls or (resp.text and resp.text.strip())):
+                            if active_candidates[0] != model_name:
+                                active_candidates.remove(model_name)
+                                active_candidates.insert(0, model_name)
+                            break
+                        resp = None
+                    except Exception as err:
+                        last_err = err
+                        err_str = str(err)
+                        if "429" in err_str or "RESOURCE_EXHAUSTED" in err_str or "404" in err_str:
+                            if model_name in active_candidates:
+                                active_candidates.remove(model_name)
+                        logger.warning(f"Cloud model {model_name} failed ({err}), trying next...")
+                        resp = None
+
+                if resp is None:
+                    if completed_tools:
+                        return "Done (cloud summary unavailable):\n" + "\n".join(completed_tools)
+                    raise RuntimeError(f"All cloud Gemini models failed: {last_err}")
+
+                if not resp.function_calls:
+                    return (resp.text or "").strip()
+
+                if resp.candidates and resp.candidates[0].content:
+                    history.append(resp.candidates[0].content)
+
+                response_parts = []
+                for fc in resp.function_calls:
+                    fn = tool_map.get(fc.name)
+                    if fn is None:
+                        res_payload = {"error": f"Unknown tool: {fc.name}"}
+                    else:
+                        try:
+                            args = dict(fc.args or {})
+                            res_str = fn(**args)
+                            completed_tools.append(f"{fc.name}: {res_str}")
+                            res_payload = {"result": res_str}
+                        except Exception as tool_err:
+                            logger.warning(f"Cloud tool {fc.name} error: {tool_err}")
+                            res_payload = {"error": str(tool_err)}
+                    response_parts.append(
+                        types.Part.from_function_response(name=fc.name, response=res_payload)
+                    )
+                history.append(types.Content(role="user", parts=response_parts))
+
+            return "\n".join(completed_tools) or "Done."
 
         final_answer = await asyncio.to_thread(_invoke_cloud)
         new_videos = self._collect_new_videos(before_videos, final_answer)

@@ -387,28 +387,29 @@ def process_reel(
             out_w = max(2, (orig_w // 2) * 2)
             out_h = max(2, (orig_h // 2) * 2)
 
-        # --- 1. Dynamic Detection of App Popups ---
+        # --- 1. Bio Outro Detection (run first so app scan excludes bio tail) ---
+        outro_dur = 3.2
+        use_bio = bool(replace_bio and clip_dur >= 8.0)
+        has_bio_in_video = detect_bio_screen(video_path, max_duration=clip_dur) if use_bio else False
+        main_dur = max(1.0, clip_dur - outro_dur) if (use_bio and has_bio_in_video) else clip_dur
+        total_out_dur = (main_dur + outro_dur) if use_bio else clip_dur
+
+        # --- 2. Dynamic Detection of App Popups ---
         ranges_to_overlay: List[Tuple[float, float]] = []
         if app_overlay_range is not None:
             ranges_to_overlay.append(app_overlay_range)
         else:
-            detected_ranges = detect_app_screen_ranges(video_path, max_duration=clip_dur)
+            detected_ranges = detect_app_screen_ranges(video_path, max_duration=main_dur)
             if detected_ranges:
                 ranges_to_overlay.extend(detected_ranges)
                 if progress_callback:
                     time_strs = ", ".join(f"{s}s-{e}s" for s, e in detected_ranges)
                     progress_callback(f"📱 <b>[2/4] Auto-detected app popups at:</b> <code>{time_strs}</code>")
-            elif clip_dur >= 16.0:
+            elif main_dur >= 16.0:
                 ranges_to_overlay.append((12.0, 16.5))
 
-        # --- 2. Bio Outro Detection ---
-        outro_dur = 3.2
-        use_bio = bool(replace_bio and clip_dur >= 8.0)
-        has_bio_in_video = False
         outro_img_path: Optional[Path] = None
-
         if use_bio:
-            has_bio_in_video = detect_bio_screen(video_path, max_duration=clip_dur)
             outro_img_path = _resolve_bio_outro_image(out_w, out_h, insta_handle=insta_handle)
             temp_artifacts.append(outro_img_path)
             if progress_callback:
@@ -432,12 +433,9 @@ def process_reel(
                 temp_artifacts.append(cloned_wav)
 
         # --- 4. Build Single-Pass FFmpeg Graph ---
-        main_dur = max(1.0, clip_dur - outro_dur) if (use_bio and has_bio_in_video) else clip_dur
-        total_out_dur = (main_dur + outro_dur) if use_bio else clip_dur
-
         inputs: List[str] = ["-i", str(video_path)]
         filter_parts: List[str] = [
-            f"[0:v]trim=0:{main_dur:.3f},setpts=PTS-STARTPTS,fps=24,scale={out_w}:{out_h}:flags=fast_bilinear,setsar=1[v0]"
+            f"[0:v]trim=0:{main_dur:.3f},setpts=PTS-STARTPTS,fps=24,scale={out_w}:{out_h}:flags=fast_bilinear,setsar=1,format=yuv420p[v0]"
         ]
         v_cur = "v0"
 
@@ -452,9 +450,12 @@ def process_reel(
         if valid_ranges and app_img_path.exists():
             app_idx = len(inputs) // 2
             inputs.extend(["-i", str(app_img_path)])
+            max_app_w = int(out_w * 0.90)
             target_app_h = int(out_h * 0.72)
             enable_expr = "+".join(f"between(t,{s:.2f},{e:.2f})" for s, e in valid_ranges)
-            filter_parts.append(f"[{app_idx}:v]scale=-1:{target_app_h}[app_ov]")
+            filter_parts.append(
+                f"[{app_idx}:v]scale={max_app_w}:{target_app_h}:force_original_aspect_ratio=decrease[app_ov]"
+            )
             filter_parts.append(f"[{v_cur}][app_ov]overlay=(W-w)/2:(H-h)/2:enable='{enable_expr}'[v_app]")
             v_cur = "v_app"
 
@@ -475,8 +476,9 @@ def process_reel(
         if use_bio and outro_img_path is not None:
             outro_idx = len(inputs) // 2
             inputs.extend(["-loop", "1", "-t", f"{outro_dur:.2f}", "-framerate", "24", "-i", str(outro_img_path)])
+            filter_parts.append(f"[{v_cur}]format=yuv420p[v_pre]")
             filter_parts.append(f"[{outro_idx}:v]scale={out_w}:{out_h},setsar=1,format=yuv420p[v_outro]")
-            filter_parts.append(f"[{v_cur}][v_outro]concat=n=2:v=1:a=0[vout]")
+            filter_parts.append("[v_pre][v_outro]concat=n=2:v=1:a=0[vout]")
             v_cur = "vout"
         else:
             filter_parts.append(f"[{v_cur}]format=yuv420p[vout]")
@@ -620,15 +622,17 @@ def apply_edit_instructions(
 
                 ov = ImageClip(str(img_path))
                 ov = set_size(ov, height=target_h)
-                ow = ov.size[0]
+                if ov.size[0] > int(vw * 0.92):
+                    ov = set_size(ov, width=int(vw * 0.92))
+                ow, oh_ov = ov.size
 
                 # Center horizontally, vertically centered
                 pos_x = (vw - ow) // 2
-                pos_y = (vh - target_h) // 2
+                pos_y = (vh - oh_ov) // 2
 
                 pos_map = {
                     "top": (pos_x, int(vh * 0.05)),
-                    "bottom": (pos_x, vh - target_h - int(vh * 0.05)),
+                    "bottom": (pos_x, vh - oh_ov - int(vh * 0.05)),
                     "top-left": (int(vw * 0.04), int(vh * 0.05)),
                     "top-right": (vw - ow - int(vw * 0.04), int(vh * 0.05)),
                     "center": (pos_x, pos_y),

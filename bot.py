@@ -41,7 +41,7 @@ from config import (
     LOW_MEMORY_MODE
 )
 from video_processor import download_media, process_reel, apply_edit_instructions
-from prompt_parser import parse_edit_prompt
+from prompt_parser import parse_edit_prompt, assign_images_to_instructions
 from agy_bridge import agy_bridge
 
 logging.basicConfig(
@@ -379,6 +379,13 @@ async def receive_video(update: Update, context: ContextTypes.DEFAULT_TYPE):
     video = update.message.video or update.message.document
     caption = update.message.caption or ""
 
+    if not video:
+        url_m = URL_REGEX.search(text)
+        extra = URL_REGEX.sub("", text).strip(" |:-\n\t") if url_m else ""
+        if url_m and "|" not in text and extra:
+            await handle_agy_message(update, context)
+            return ConversationHandler.END
+
     status = await update.message.reply_text("&#9203; <b>Receiving video...</b>", parse_mode="HTML")
 
     try:
@@ -634,7 +641,8 @@ async def _start_processing(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 # --- Custom prompt-driven edit pipeline ---
                 updater("&#129302; <b>Parsing your edit instructions...</b>")
 
-                img_names = [str(p) for p in session.images]
+                effective_images = session.images or [p for p in USER_RECENT_IMAGES.get(uid, []) if p.exists()]
+                img_names = [str(p) for p in effective_images]
 
                 instructions = await asyncio.to_thread(
                     parse_edit_prompt,
@@ -643,16 +651,7 @@ async def _start_processing(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     GEMINI_API_KEY,
                 )
 
-                img_queue = list(session.images)
-                for instr in instructions:
-                    if instr.image_path is not None:
-                        fname = Path(instr.image_path).name
-                        matched = next((p for p in img_queue if p.name == fname), None)
-                        if matched:
-                            instr.image_path = matched
-                            img_queue.remove(matched)
-                        elif img_queue:
-                            instr.image_path = img_queue.pop(0)
+                assign_images_to_instructions(instructions, effective_images)
 
                 if not instructions:
                     await status_msg.edit_text(

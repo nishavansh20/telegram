@@ -35,8 +35,8 @@ AGY_LS_EXE = os.getenv("AGY_LS_EXE", r"C:\Users\vansh\AppData\Local\Programs\ant
 AGY_CLI_PATH = os.getenv("AGY_CLI_PATH", r"C:\Users\vansh\.gemini\antigravity\bin\agentapi.bat")
 AGY_BRAIN_DIR = Path(os.getenv("AGY_BRAIN_DIR", r"C:\Users\vansh\.gemini\antigravity\brain"))
 AGY_DEFAULT_MODEL = os.getenv("AGY_DEFAULT_MODEL", "gemini-4-hydrogen-xhigh")
-GEMINI_CLOUD_MODEL = os.getenv("GEMINI_CLOUD_MODEL", "gemini-4-hydrogen")
-GEMINI_FALLBACK_MODELS = ("gemini-3.8-flash", "gemini-3.6-flash", "gemini-3.5-flash")
+GEMINI_CLOUD_MODEL = os.getenv("GEMINI_CLOUD_MODEL", "gemini-3.6-flash")
+GEMINI_FALLBACK_MODELS = ("gemini-3.5-flash", "gemini-3.5-flash-lite", "gemini-4-hydrogen")
 
 # 24/7 Health & Cron Ping Configuration
 HEALTH_PORT = int(os.getenv("PORT", os.getenv("HEALTH_PORT", "8080")))

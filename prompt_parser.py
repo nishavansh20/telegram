@@ -117,8 +117,8 @@ def parse_with_gemini(prompt: str, attached_images: List[str], api_key: str) -> 
         client = genai.Client(
             api_key=api_key,
             http_options=types.HttpOptions(
-                timeout=25000,
-                retry_options=types.HttpRetryOptions(attempts=2),
+                timeout=18000,
+                retry_options=types.HttpRetryOptions(attempts=1),
             ),
         )
         image_note = f"\n\nAttached images: {', '.join(attached_images)}" if attached_images else ""
@@ -329,3 +329,33 @@ def parse_edit_prompt(
     if gemini_api_key:
         return parse_with_gemini(prompt, attached_images, gemini_api_key)
     return parse_with_regex(prompt, attached_images)
+
+
+def assign_images_to_instructions(
+    instructions: List[EditInstruction],
+    image_paths: List[Path],
+) -> List[EditInstruction]:
+    """Bind user-uploaded images to visual edit ops (exact filename match first, then unused slots)."""
+    queue = [Path(p) for p in image_paths if Path(p).exists()]
+    visual_ops = ("replace_region", "add_watermark", "extend_video", "replace_bio")
+    unmatched = []
+
+    for instr in instructions:
+        if instr.op not in visual_ops:
+            continue
+        if instr.image_path is not None:
+            fname = Path(instr.image_path).name
+            hit = next((p for p in queue if p.name == fname), None)
+            if hit:
+                instr.image_path = hit
+                queue.remove(hit)
+                continue
+        unmatched.append(instr)
+
+    for instr in unmatched:
+        if not queue:
+            break
+        if instr.image_path is None or not Path(instr.image_path).exists():
+            instr.image_path = queue.pop(0)
+
+    return instructions

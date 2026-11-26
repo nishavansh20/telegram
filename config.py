@@ -42,4 +42,8 @@ GEMINI_FALLBACK_MODELS = ("gemini-3.8-flash", "gemini-3.6-flash", "gemini-3.5-fl
 HEALTH_PORT = int(os.getenv("PORT", os.getenv("HEALTH_PORT", "8080")))
 ENABLE_HEALTH_SERVER = os.getenv("ENABLE_HEALTH_SERVER", "true").lower() == "true"
 
+# Cloud / Low-Memory (512MB Render Free Tier) detection
+IS_CLOUD = bool(os.getenv("RENDER") or os.getenv("RAILWAY_ENVIRONMENT") or os.getenv("DYNO"))
+LOW_MEMORY_MODE = os.getenv("LOW_MEMORY_MODE", "true" if IS_CLOUD else "false").lower() == "true"
+
 

@@ -37,7 +37,8 @@ from aiohttp import web
 
 from config import (
     TELEGRAM_BOT_TOKEN, ALLOWED_USER_IDS, TEMP_DIR, ASSETS_DIR,
-    ELEVENLABS_API_KEY, GEMINI_API_KEY, HEALTH_PORT, ENABLE_HEALTH_SERVER
+    ELEVENLABS_API_KEY, GEMINI_API_KEY, HEALTH_PORT, ENABLE_HEALTH_SERVER,
+    LOW_MEMORY_MODE
 )
 from video_processor import download_media, process_reel, apply_edit_instructions
 from prompt_parser import parse_edit_prompt
@@ -60,9 +61,12 @@ WAITING_PROMPT, COLLECTING_IMAGES, PROCESSING = range(3)
 # Per-user state store
 USER_INSTA_HANDLES: Dict[int, str] = {}
 USER_CUSTOM_VOICES: Dict[int, Path] = {}
+USER_RECENT_IMAGES: Dict[int, List[Path]] = {}
+MEDIA_GROUP_BUFFERS: Dict[str, Dict[str, Any]] = {}
 CRON_PING_SUBSCRIBERS: Dict[int, int] = {}  # user_id -> interval in minutes
 CRON_LAST_PING: Dict[int, float] = {}        # user_id -> timestamp
 BOT_START_TIME: float = time.time()
+RENDER_SEMAPHORE = asyncio.Semaphore(1)       # Serialize heavy video renders (protects 512MB RAM)
 
 # In-progress session per user: video path + accumulated images + prompt
 @dataclass
@@ -85,7 +89,7 @@ def is_authorized(user_id: int) -> bool:
 
 
 def make_status_updater(status_msg, loop):
-    """Thread-safe, rate-limited HTML status updater for Telegram."""
+    """Thread-safe HTML status updater for Telegram (throttles only Progress bars)."""
     last = [""]
     ts = [0.0]
 
@@ -100,7 +104,8 @@ def make_status_updater(status_msg, loop):
         if not text or text.startswith("MoviePy") or text.startswith("chunk"):
             return
         now = time.time()
-        if text == last[0] or ((now - ts[0]) < 2.0 and not text.startswith("\U0001f3ac")):
+        is_progress_spam = "Progress:" in text and "Progress:" in last[0] and (now - ts[0]) < 2.2
+        if text == last[0] or is_progress_spam:
             return
         last[0] = text
         ts[0] = now
@@ -115,6 +120,52 @@ def make_status_updater(status_msg, loop):
                 pass
 
     return update
+
+
+def _cleanup_paths(paths: List[Path]):
+    for p in paths:
+        try:
+            if p and Path(p).exists():
+                Path(p).unlink()
+        except Exception:
+            pass
+
+
+async def _safe_edit_error(update: Update, status_msg, prefix: str, err: Exception):
+    safe_e = html.escape(str(err)[:1500])
+    try:
+        await status_msg.edit_text(f"{prefix} <code>{safe_e}</code>", parse_mode="HTML")
+    except Exception:
+        await update.message.reply_text(f"Error: {str(err)[:1500]}")
+
+
+async def _deliver_agy_result(update: Update, status_msg, answer: str, videos: List[Path]):
+    """Send agent reply chunks and rendered videos, cleaning cloud output copies afterward."""
+    try:
+        await status_msg.delete()
+    except Exception:
+        pass
+
+    for chunk in _split_message(answer):
+        try:
+            await update.message.reply_text(chunk, parse_mode="Markdown")
+        except Exception:
+            try:
+                await update.message.reply_text(chunk, parse_mode="HTML")
+            except Exception:
+                await update.message.reply_text(chunk)
+
+    for vid in videos:
+        if vid.exists() and vid.stat().st_size > 0:
+            with open(vid, "rb") as f:
+                await update.message.reply_video(
+                    video=f,
+                    caption=f"🎬 <b>Peak Arena Video Ready!</b>\n<code>{vid.name}</code>",
+                    parse_mode="HTML",
+                    write_timeout=180,
+                )
+            if LOW_MEMORY_MODE:
+                _cleanup_paths([vid])
 
 
 async def download_tg_file(bot, file_id: str, dest: Path) -> Path:
@@ -216,6 +267,7 @@ async def reset_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     uid = update.effective_user.id
     agy_bridge.reset_user(uid)
     USER_SESSIONS.pop(uid, None)
+    _cleanup_paths(USER_RECENT_IMAGES.pop(uid, []))
     await update.message.reply_text(
         "🔄 <b>Session reset!</b> Started a fresh AGY conversation context.",
         parse_mode="HTML",
@@ -302,7 +354,10 @@ async def set_insta_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 async def cancel_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     uid = update.effective_user.id
-    USER_SESSIONS.pop(uid, None)
+    sess = USER_SESSIONS.pop(uid, None)
+    if sess:
+        _cleanup_paths([sess.video_path, *sess.images])
+    _cleanup_paths(USER_RECENT_IMAGES.pop(uid, []))
     await update.message.reply_text(
         "&#10060; Session cancelled. Send a new video or link to start again.",
         reply_markup=ReplyKeyboardRemove()
@@ -436,36 +491,22 @@ async def receive_prompt(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if session.prompt:
             agent_prompt += f"\nUser instructions: {session.prompt}"
 
+        recent_imgs = [p for p in USER_RECENT_IMAGES.get(uid, []) if p.exists()]
+        attached = [session.video_path] + (session.images or recent_imgs)
         try:
-            answer, videos = await agy_bridge.ask_agent(
-                user_id=uid,
-                prompt=agent_prompt,
-                attached_files=[session.video_path] + session.images,
-                status_callback=updater
-            )
-            try:
-                await status_msg.delete()
-            except Exception:
-                pass
-
-            for chunk in _split_message(answer):
-                try:
-                    await update.message.reply_text(chunk, parse_mode="Markdown")
-                except Exception:
-                    await update.message.reply_text(chunk)
-
-            for vid in videos:
-                if vid.exists() and vid.stat().st_size > 0:
-                    with open(vid, "rb") as f:
-                        await update.message.reply_video(
-                            video=f,
-                            caption=f"🎬 <b>Peak Arena Video Ready!</b>\n<code>{vid.name}</code>",
-                            parse_mode="HTML",
-                            write_timeout=180
-                        )
+            async with RENDER_SEMAPHORE:
+                answer, videos = await agy_bridge.ask_agent(
+                    user_id=uid,
+                    prompt=agent_prompt,
+                    attached_files=attached,
+                    status_callback=updater
+                )
+            await _deliver_agy_result(update, status_msg, answer, videos)
         except Exception as e:
             logger.error(f"AGY handoff error: {e}", exc_info=True)
-            await status_msg.edit_text(f"❌ Error: {html.escape(str(e))}")
+            await _safe_edit_error(update, status_msg, "❌ Error:", e)
+        finally:
+            _cleanup_paths([session.video_path, *session.images])
 
         return ConversationHandler.END
 
@@ -573,62 +614,61 @@ async def _start_processing(update: Update, context: ContextTypes.DEFAULT_TYPE):
     )
     updater = make_status_updater(status_msg, loop)
 
+    final_mp4: Optional[Path] = None
     try:
-        if session.mode == "peak" or session.prompt.upper() == "DEFAULT":
-            # --- Default Peak Arena rebrand pipeline ---
-            final_mp4 = await asyncio.to_thread(
-                process_reel,
-                video_path=session.video_path,
-                app_overlay_range=None,
-                replace_bio=True,
-                insta_handle=insta_handle,
-                custom_voice_path=custom_voice,
-                audio_replace_range=None,
-                elevenlabs_api_key=ELEVENLABS_API_KEY,
-                progress_callback=updater,
-            )
-        else:
-            # --- Custom prompt-driven edit pipeline ---
-            updater("&#129302; <b>Parsing your edit instructions...</b>")
-
-            # Resolve image paths relative to TEMP_DIR for the parser
-            img_names = [str(p) for p in session.images]
-
-            instructions = await asyncio.to_thread(
-                parse_edit_prompt,
-                session.prompt,
-                img_names,
-                GEMINI_API_KEY,
-            )
-
-            # Inject user-supplied image paths in order
-            img_queue = list(session.images)
-            for instr in instructions:
-                if instr.image_path is not None:
-                    # Try to match filename
-                    fname = Path(instr.image_path).name
-                    matched = next((p for p in img_queue if p.name == fname), None)
-                    if matched:
-                        instr.image_path = matched
-                        img_queue.remove(matched)
-                    elif img_queue:
-                        instr.image_path = img_queue.pop(0)
-
-            if not instructions:
-                await status_msg.edit_text(
-                    "&#9888; Could not parse any edits from your prompt. "
-                    "Try being more specific, or type DEFAULT for automatic rebrand.",
-                    parse_mode="HTML"
+        async with RENDER_SEMAPHORE:
+            if session.mode == "peak" or session.prompt.upper() == "DEFAULT":
+                # --- Default Peak Arena rebrand pipeline ---
+                final_mp4 = await asyncio.to_thread(
+                    process_reel,
+                    video_path=session.video_path,
+                    app_overlay_range=None,
+                    replace_bio=True,
+                    insta_handle=insta_handle,
+                    custom_voice_path=custom_voice,
+                    audio_replace_range=None,
+                    elevenlabs_api_key=ELEVENLABS_API_KEY,
+                    progress_callback=updater,
                 )
-                return ConversationHandler.END
+            else:
+                # --- Custom prompt-driven edit pipeline ---
+                updater("&#129302; <b>Parsing your edit instructions...</b>")
 
-            final_mp4 = await asyncio.to_thread(
-                apply_edit_instructions,
-                session.video_path,
-                instructions,
-                None,
-                updater,
-            )
+                img_names = [str(p) for p in session.images]
+
+                instructions = await asyncio.to_thread(
+                    parse_edit_prompt,
+                    session.prompt,
+                    img_names,
+                    GEMINI_API_KEY,
+                )
+
+                img_queue = list(session.images)
+                for instr in instructions:
+                    if instr.image_path is not None:
+                        fname = Path(instr.image_path).name
+                        matched = next((p for p in img_queue if p.name == fname), None)
+                        if matched:
+                            instr.image_path = matched
+                            img_queue.remove(matched)
+                        elif img_queue:
+                            instr.image_path = img_queue.pop(0)
+
+                if not instructions:
+                    await status_msg.edit_text(
+                        "&#9888; Could not parse any edits from your prompt. "
+                        "Try being more specific, or type DEFAULT for automatic rebrand.",
+                        parse_mode="HTML"
+                    )
+                    return ConversationHandler.END
+
+                final_mp4 = await asyncio.to_thread(
+                    apply_edit_instructions,
+                    session.video_path,
+                    instructions,
+                    None,
+                    updater,
+                )
 
         try:
             await status_msg.edit_text(
@@ -656,11 +696,11 @@ async def _start_processing(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     except Exception as e:
         logger.error(f"Processing error: {e}", exc_info=True)
-        safe_e = html.escape(str(e))
-        try:
-            await status_msg.edit_text(f"&#10060; Error: <code>{safe_e}</code>", parse_mode="HTML")
-        except Exception:
-            await update.message.reply_text(f"Error: {str(e)}")
+        await _safe_edit_error(update, status_msg, "&#10060; Error:", e)
+    finally:
+        _cleanup_paths([session.video_path, *session.images])
+        if LOW_MEMORY_MODE and final_mp4 is not None:
+            _cleanup_paths([final_mp4])
 
     return ConversationHandler.END
 
@@ -697,7 +737,7 @@ async def handle_voice_message(update: Update, context: ContextTypes.DEFAULT_TYP
 # ---------------------------------------------------------------------------
 
 async def handle_agy_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Route natural language messages directly to Antigravity Agent."""
+    """Route natural language messages (and any recently uploaded images) to AGY/Hydrogen Agent."""
     uid = update.effective_user.id
     if not is_authorized(uid):
         await update.message.reply_text("⛔ Not authorized.")
@@ -710,100 +750,118 @@ async def handle_agy_message(update: Update, context: ContextTypes.DEFAULT_TYPE)
         await update.message.reply_text("Usage: <code>/agy your question or task</code>", parse_mode="HTML")
         return
 
+    recent_imgs = [p for p in USER_RECENT_IMAGES.get(uid, []) if p.exists()]
     status_msg = await update.message.reply_text("🤖 <b>Antigravity Agent processing...</b>", parse_mode="HTML")
     loop = asyncio.get_running_loop()
     updater = make_status_updater(status_msg, loop)
 
     try:
-        answer, videos = await agy_bridge.ask_agent(
-            user_id=uid,
-            prompt=text,
-            status_callback=updater
-        )
-
-        try:
-            await status_msg.delete()
-        except Exception:
-            pass
-
-        for chunk in _split_message(answer):
-            try:
-                await update.message.reply_text(chunk, parse_mode="Markdown")
-            except Exception:
-                try:
-                    await update.message.reply_text(chunk, parse_mode="HTML")
-                except Exception:
-                    await update.message.reply_text(chunk)
-
-        for vid in videos:
-            if vid.exists() and vid.stat().st_size > 0:
-                with open(vid, "rb") as f:
-                    await update.message.reply_video(
-                        video=f,
-                        caption=f"🎬 <b>Peak Arena Video Ready!</b>\n<code>{vid.name}</code>",
-                        parse_mode="HTML",
-                        write_timeout=180
-                    )
+        async with RENDER_SEMAPHORE:
+            answer, videos = await agy_bridge.ask_agent(
+                user_id=uid,
+                prompt=text,
+                attached_files=recent_imgs or None,
+                status_callback=updater
+            )
+        await _deliver_agy_result(update, status_msg, answer, videos)
 
     except Exception as e:
         logger.error(f"AGY Agent error: {e}", exc_info=True)
-        safe_e = html.escape(str(e))
-        try:
-            await status_msg.edit_text(f"❌ <b>AGY Error:</b> <code>{safe_e}</code>", parse_mode="HTML")
-        except Exception:
-            await update.message.reply_text(f"❌ Error: {str(e)}")
+        await _safe_edit_error(update, status_msg, "❌ <b>AGY Error:</b>", e)
 
 
 async def handle_agy_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Download photo and hand off to AGY Agent."""
+    """Download single photo or multi-photo album; buffer captionless uploads for follow-up commands."""
     uid = update.effective_user.id
     if not is_authorized(uid):
         await update.message.reply_text("⛔ Not authorized.")
         return
 
-    photo = update.message.photo[-1]
-    caption = (update.message.caption or "Analyze and describe this image.").strip()
+    photo = update.message.photo[-1] if update.message.photo else None
+    doc = update.message.document
+    file_id = photo.file_id if photo else (doc.file_id if doc and doc.mime_type and doc.mime_type.startswith("image/") else None)
+    if not file_id:
+        return
 
     TEMP_DIR.mkdir(exist_ok=True)
     dest = TEMP_DIR / f"tg_photo_{uid}_{uuid.uuid4().hex[:6]}.png"
-    await download_tg_file(context.bot, photo.file_id, dest)
+    await download_tg_file(context.bot, file_id, dest)
 
-    status_msg = await update.message.reply_text("🤖 <b>Processing image with AGY Agent...</b>", parse_mode="HTML")
+    recent = USER_RECENT_IMAGES.setdefault(uid, [])
+    recent.append(dest)
+    if len(recent) > 8:
+        USER_RECENT_IMAGES[uid] = recent[-8:]
+
+    caption = (update.message.caption or "").strip()
+    mg_id = update.message.media_group_id
+
+    if mg_id:
+        buf = MEDIA_GROUP_BUFFERS.get(mg_id)
+        if buf is None:
+            MEDIA_GROUP_BUFFERS[mg_id] = {"files": [dest], "caption": caption, "update": update}
+            await asyncio.sleep(1.5)
+            batch = MEDIA_GROUP_BUFFERS.pop(mg_id, None)
+            if not batch:
+                return
+            files = batch["files"]
+            batch_cap = batch["caption"]
+            first_upd = batch["update"]
+            if not batch_cap:
+                await first_upd.message.reply_text(
+                    f"📷 <b>Saved {len(files)} images!</b>\n"
+                    "Now send your instruction (e.g. <code>Update logo and app screen from these images, then edit https://...</code>).",
+                    parse_mode="HTML"
+                )
+                return
+            files_to_send = [p for p in USER_RECENT_IMAGES.get(uid, []) if p.exists()]
+            status_msg = await first_upd.message.reply_text(
+                f"🤖 <b>Processing {len(files)} images with Agent...</b>", parse_mode="HTML"
+            )
+            loop = asyncio.get_running_loop()
+            updater = make_status_updater(status_msg, loop)
+            try:
+                async with RENDER_SEMAPHORE:
+                    answer, videos = await agy_bridge.ask_agent(
+                        user_id=uid,
+                        prompt=batch_cap,
+                        attached_files=files_to_send or files,
+                        status_callback=updater
+                    )
+                await _deliver_agy_result(first_upd, status_msg, answer, videos)
+            except Exception as e:
+                logger.error(f"AGY Album error: {e}", exc_info=True)
+                await _safe_edit_error(first_upd, status_msg, "❌ Error:", e)
+        else:
+            buf["files"].append(dest)
+            if caption and not buf["caption"]:
+                buf["caption"] = caption
+        return
+
+    if not caption:
+        await update.message.reply_text(
+            f"📷 <b>Image saved ({len(USER_RECENT_IMAGES[uid])} ready).</b>\n"
+            "Send more images or type your command next (e.g. <code>update default logo with this</code> or send a Reel link).",
+            parse_mode="HTML"
+        )
+        return
+
+    status_msg = await update.message.reply_text("🤖 <b>Processing image(s) with Agent...</b>", parse_mode="HTML")
     loop = asyncio.get_running_loop()
     updater = make_status_updater(status_msg, loop)
 
     try:
-        answer, videos = await agy_bridge.ask_agent(
-            user_id=uid,
-            prompt=caption,
-            attached_files=[dest],
-            status_callback=updater
-        )
-
-        try:
-            await status_msg.delete()
-        except Exception:
-            pass
-
-        for chunk in _split_message(answer):
-            try:
-                await update.message.reply_text(chunk, parse_mode="Markdown")
-            except Exception:
-                await update.message.reply_text(chunk)
-
-        for vid in videos:
-            if vid.exists() and vid.stat().st_size > 0:
-                with open(vid, "rb") as f:
-                    await update.message.reply_video(
-                        video=f,
-                        caption=f"🎬 <b>Peak Arena Video Ready!</b>\n<code>{vid.name}</code>",
-                        parse_mode="HTML",
-                        write_timeout=180
-                    )
-
+        files_to_send = [p for p in USER_RECENT_IMAGES.get(uid, []) if p.exists()]
+        async with RENDER_SEMAPHORE:
+            answer, videos = await agy_bridge.ask_agent(
+                user_id=uid,
+                prompt=caption,
+                attached_files=files_to_send or [dest],
+                status_callback=updater
+            )
+        await _deliver_agy_result(update, status_msg, answer, videos)
     except Exception as e:
         logger.error(f"AGY Photo error: {e}", exc_info=True)
-        await status_msg.edit_text(f"❌ Error: {html.escape(str(e))}")
+        await _safe_edit_error(update, status_msg, "❌ Error:", e)
 
 
 # ---------------------------------------------------------------------------
@@ -938,8 +996,8 @@ def main():
     app.add_handler(MessageHandler(filters.VOICE, handle_voice_message))
     app.add_handler(conv)
 
-    # Remote AGY agent handles non-video photos and general text messages
-    app.add_handler(MessageHandler(filters.PHOTO & ~filters.COMMAND, handle_agy_photo))
+    # Remote AGY agent handles non-video photos/images and general text messages
+    app.add_handler(MessageHandler((filters.PHOTO | filters.Document.IMAGE) & ~filters.COMMAND, handle_agy_photo))
     app.add_handler(MessageHandler((filters.TEXT & ~filters.COMMAND) & ~filters.Regex(URL_REGEX), handle_agy_message))
 
     print("[+] Bot online. Polling...")

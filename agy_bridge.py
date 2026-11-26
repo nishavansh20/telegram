@@ -89,8 +89,8 @@ class AGYBridge:
             f"[Telegram Remote Client | User ID: {user_id} | Workspace: Peak-Arena-Reel-Automation]",
             "You are the remote Antigravity (AGY) Agent for the Peak Arena Reel Automation system.",
             "You have direct access to tools for video editing, file management, and terminal execution.",
-            "Peak Arena tools include: download_reel, edit_reel, peak_arena_rebrand.",
-            "When asked to download, rebrand, or edit videos, invoke the corresponding tools.",
+            "Peak Arena tools include: download_reel, edit_reel, peak_arena_rebrand, replace_default_asset.",
+            "When asked to replace default bot images (logo, app overlay, bio outro) or edit videos, invoke the tools directly.",
             "Keep Telegram responses helpful, concise, and formatted in clean markdown.",
             ""
         ]
@@ -287,7 +287,7 @@ class AGYBridge:
         """Cloud agent fallback powered by Gemini 4 Hydrogen via google-genai."""
         from google import genai
         from google.genai import types
-        from video_processor import download_media, apply_edit_instructions, process_reel
+        from video_processor import download_media, apply_edit_instructions, process_reel, update_default_asset
         from prompt_parser import parse_edit_prompt
 
         if status_callback:
@@ -296,6 +296,11 @@ class AGYBridge:
         def notify(msg: str):
             if status_callback:
                 status_callback(msg)
+
+        def replace_default_asset(source_image_path: str, target_asset: str) -> str:
+            """Update a default bot image in assets/ directory. target_asset must be one of: logo.png, app_overlay_framed.png, app_screen_clean.png, insta_bio_outro.png (or reset_bio)."""
+            notify(f"⚙️ <b>Action:</b> <code>replace_default_asset({target_asset})</code>")
+            return json.dumps(update_default_asset(source_image_path, target_asset))
 
         def download_reel(url: str) -> str:
             """Download an Instagram Reel or YouTube Short from a URL and return the local video path."""
@@ -345,7 +350,8 @@ class AGYBridge:
 
         system_inst = (
             "You are the Peak Arena Cloud Agent running over Telegram.\n"
-            "Tools available: download_reel, edit_reel, peak_arena_rebrand, list_workspace_files.\n"
+            "Tools available: download_reel, edit_reel, peak_arena_rebrand, replace_default_asset, list_workspace_files.\n"
+            "If the user uploads images and asks to update default bot pics in assets/, call replace_default_asset for each target (logo.png, app_overlay_framed.png, app_screen_clean.png, insta_bio_outro.png), then run peak_arena_rebrand or edit_reel if requested.\n"
             "When asked to download, rebrand, or edit videos, invoke the tools directly and report the exact output path.\n"
             "Keep replies concise and readable on mobile Telegram."
         )
@@ -377,7 +383,7 @@ class AGYBridge:
             )
             cfg = types.GenerateContentConfig(
                 system_instruction=system_inst,
-                tools=[download_reel, edit_reel, peak_arena_rebrand, list_workspace_files],
+                tools=[download_reel, edit_reel, peak_arena_rebrand, replace_default_asset, list_workspace_files],
             )
             candidates = list(dict.fromkeys(m for m in (GEMINI_CLOUD_MODEL, *GEMINI_FALLBACK_MODELS) if m))
 

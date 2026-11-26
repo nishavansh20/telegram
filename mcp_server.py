@@ -93,5 +93,15 @@ def peak_arena_rebrand(video_path: str, insta_handle: str = "@_maxeddd") -> str:
     return json.dumps({"output_path": str(output), "status": "done"})
 
 
+@app.tool()
+def replace_default_asset(source_image_path: str, target_asset: str) -> str:
+    """
+    Replace a default Peak Arena image in assets/.
+    target_asset: logo.png, app_overlay_framed.png, app_screen_clean.png, insta_bio_outro.png, or reset_bio.
+    """
+    from video_processor import update_default_asset
+    return json.dumps(update_default_asset(source_image_path, target_asset))
+
+
 if __name__ == "__main__":
     app.run(transport="stdio")

@@ -1,9 +1,10 @@
 FROM python:3.11-slim
 
-# Install system ffmpeg and git
+# Install system ffmpeg, git, and readable sans-serif font for PIL overlays
 RUN apt-get update && apt-get install -y --no-install-recommends \
     ffmpeg \
     git \
+    fonts-dejavu-core \
     && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /app
